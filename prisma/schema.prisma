@@ -1,0 +1,409 @@
+// ============================================================
+// WXG Attendance System - Prisma Schema
+// PostgreSQL on Azure
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum CompanyEntity {
+  WAXMAN_GROUP        // וקסמן גרופ
+  WAXMAN_CONSULTANTS  // וקסמן יועצים והנדסה
+  WAXMAN_MANAGEMENT   // וקסמן ניהול והשבחה
+  WAXMAN_INFRASTRUCTURE // וקסמן תשתיות, תעשיה ואנרגיה
+}
+
+enum WorkAgreementType {
+  HOURLY      // שעתי
+  GLOBAL      // גלובלי
+  SHIFTS      // משמרות
+}
+
+enum AttendanceSource {
+  APP         // אפליקציה
+  WEB         // ממשק ווב
+  CLOCK       // שעון נוכחות
+}
+
+enum LocationType {
+  PROJECT_SITE  // אתר פרויקט
+  OFFICE        // משרד
+}
+
+enum ReportStatus {
+  OPEN          // פתוח — עובד יכול לערוך
+  PENDING       // ממתין לאישור חשבת שכר
+  APPROVED      // אושר
+  LOCKED        // נעול (לאחר סגירת חודש)
+}
+
+enum AbsenceType {
+  VACATION      // חופשה
+  SICK          // מחלה
+  RESERVE       // מילואים
+  OTHER         // אחר
+}
+
+enum SyncStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+// ============================================================
+// EMPLOYEES — מסונכרן מ-CRM
+// ============================================================
+
+model Employee {
+  id              String        @id @default(uuid())
+  
+  // מזהים מ-CRM
+  crmId           String        @unique // rtm_wxg_emplid
+  adId            String?       @unique // rtm_s_adid — לשימוש Azure AD SSO
+  crmNumerator    String?       // rtm_nu_crm_employee
+
+  // פרטים אישיים
+  fullName        String        // rtm_name
+  email           String?       // rtm_s_mail
+  phone           String?       // rtm_s_telephone
+  idNumber        String?       // rtm_s_id_employee
+  jobTitle        String?       // rtm_s_title
+
+  // שיוך ארגוני
+  company         CompanyEntity
+  isActive        Boolean       @default(true)
+
+  // תפקיד מערכת
+  isPayrollAdmin  Boolean       @default(false) // חשבת שכר
+
+  // מטא
+  lastSyncedAt    DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // קשרים
+  workAgreements  WorkAgreement[]
+  projectAccess   EmployeeProject[]
+  attendanceLogs  AttendanceLog[]
+  timeEntries     TimeEntry[]
+  absences        Absence[]
+  monthlyReports  MonthlyReport[]
+
+  @@index([crmId])
+  @@index([adId])
+  @@index([company])
+}
+
+// ============================================================
+// PROJECTS — מסונכרן מ-CRM
+// ============================================================
+
+model Project {
+  id              String    @id @default(uuid())
+  
+  // מזהים מ-CRM
+  crmId           String    @unique // rtm_projectsid
+  projectCode     String?   // rtm_s_project / rtm_auto_code
+  
+  // פרטים
+  name            String    // rtm_name
+  description     String?   // rtm_s_description
+  company         CompanyEntity? // חטיבה — rtm_id_department
+  isActive        Boolean   @default(true) // statecode
+
+  // מטא
+  lastSyncedAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // קשרים
+  employeeAccess  EmployeeProject[]
+  location        ProjectLocation?
+  timeEntries     TimeEntry[]
+
+  @@index([crmId])
+  @@index([isActive])
+}
+
+// ============================================================
+// EMPLOYEE ↔ PROJECT — הרשאות, מסונכרן מ-CRM (connection)
+// ============================================================
+
+model EmployeeProject {
+  id          String    @id @default(uuid())
+  employeeId  String
+  projectId   String
+  
+  // מ-CRM
+  crmConnectionId String? @unique // connectionid
+
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  employee    Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, projectId])
+  @@index([employeeId])
+  @@index([projectId])
+}
+
+// ============================================================
+// LOCATIONS — פוליגונים לפרויקטים + 3 משרדים
+// ============================================================
+
+model ProjectLocation {
+  id          String        @id @default(uuid())
+  projectId   String        @unique
+  locationType LocationType @default(PROJECT_SITE)
+  name        String        // שם האתר / המשרד
+
+  // פוליגון — מערך של נקודות [lat, lng]
+  // מאוחסן כ-JSON: [[lat,lng], [lat,lng], ...]
+  polygon     Json
+
+  // מרכז הפוליגון (לחישוב מהיר)
+  centerLat   Float
+  centerLng   Float
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model OfficeLocation {
+  id          String    @id @default(uuid())
+  name        String    // ירושלים / תל אביב / באר שבע
+  
+  // פוליגון — אותו פורמט
+  polygon     Json
+  centerLat   Float
+  centerLng   Float
+  
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// ============================================================
+// WORK AGREEMENTS — הסכמי עבודה
+// ============================================================
+
+model WorkAgreement {
+  id              String            @id @default(uuid())
+  employeeId      String
+  agreementType   WorkAgreementType
+
+  // תוקף
+  validFrom       DateTime
+  validTo         DateTime?         // null = בתוקף
+
+  // שעתי / גלובלי
+  dailyHours      Float?            // תקן יומי
+  weeklyHours     Float?            // תקן שבועי
+  monthlyHours    Float?            // תקן חודשי (לגלובלי)
+
+  // שעות נוספות
+  overtime125From Float?            // מתי מתחיל 125%
+  overtime150From Float?            // מתי מתחיל 150%
+
+  // הפסקות
+  breakMinutes    Int?              // דקות הפסקה שנגרעות אוטומטית
+
+  // משמרות — פרטים נשמרים ב-ShiftTemplate
+  shiftTemplateId String?
+
+  isActive        Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  employee        Employee          @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  shiftTemplate   ShiftTemplate?    @relation(fields: [shiftTemplateId], references: [id])
+
+  @@index([employeeId])
+  @@index([validFrom, validTo])
+}
+
+model ShiftTemplate {
+  id          String    @id @default(uuid())
+  name        String    // שם המשמרת (בוקר / ערב / לילה)
+  
+  startTime   String    // "07:00"
+  endTime     String    // "15:00"
+  
+  // ימים בשבוע שהמשמרת רלוונטית (0=ראשון, 6=שבת)
+  days        Int[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  agreements  WorkAgreement[]
+}
+
+// ============================================================
+// ATTENDANCE LOGS — כניסות/יציאות גולמיות
+// ============================================================
+
+model AttendanceLog {
+  id              String            @id @default(uuid())
+  employeeId      String
+
+  // זמן
+  timestamp       DateTime
+  isEntry         Boolean           // true = כניסה, false = יציאה
+
+  // מיקום בזמן הדיווח
+  lat             Float?
+  lng             Float?
+  locationName    String?           // שם האתר/משרד אם בפוליגון
+  isInsidePolygon Boolean           @default(false)
+
+  // מקור
+  source          AttendanceSource  @default(APP)
+
+  // האם דיווח רטרואקטיבי
+  isRetroactive   Boolean           @default(false)
+  retroactiveNote String?
+
+  // מטא
+  deviceId        String?
+  ipAddress       String?
+  createdAt       DateTime          @default(now())
+
+  employee        Employee          @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, timestamp])
+  @@index([timestamp])
+}
+
+// ============================================================
+// TIME ENTRIES — שעות לפי פרויקט
+// ============================================================
+
+model TimeEntry {
+  id              String    @id @default(uuid())
+  employeeId      String
+  projectId       String
+  monthlyReportId String?
+
+  // תאריך ושעות
+  date            DateTime  @db.Date
+  startTime       DateTime
+  endTime         DateTime?
+  totalMinutes    Int?      // מחושב בסגירה
+
+  // האם רטרואקטיבי
+  isRetroactive   Boolean   @default(false)
+  retroactiveNote String?
+
+  // מטא
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  employee        Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project         Project       @relation(fields: [projectId], references: [id])
+  monthlyReport   MonthlyReport? @relation(fields: [monthlyReportId], references: [id])
+
+  @@index([employeeId, date])
+  @@index([projectId])
+  @@index([monthlyReportId])
+}
+
+// ============================================================
+// ABSENCES — היעדרויות
+// ============================================================
+
+model Absence {
+  id              String      @id @default(uuid())
+  employeeId      String
+  monthlyReportId String?
+
+  absenceType     AbsenceType
+  startDate       DateTime    @db.Date
+  endDate         DateTime    @db.Date
+  totalDays       Int
+
+  note            String?
+  documentUrl     String?     // קובץ אישור (Azure Blob)
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  employee        Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  monthlyReport   MonthlyReport? @relation(fields: [monthlyReportId], references: [id])
+
+  @@index([employeeId])
+  @@index([startDate, endDate])
+}
+
+// ============================================================
+// MONTHLY REPORTS — סגירת חודש
+// ============================================================
+
+model MonthlyReport {
+  id              String        @id @default(uuid())
+  employeeId      String
+  
+  year            Int
+  month           Int           // 1-12
+
+  // סיכום שעות (מחושב בסגירה)
+  totalWorkedMinutes    Int     @default(0)
+  expectedMinutes       Int     @default(0)
+  overtimeMinutes       Int     @default(0)
+  absenceMinutes        Int     @default(0)
+
+  status          ReportStatus  @default(OPEN)
+
+  // אישור חשבת שכר
+  approvedBy      String?       // employeeId של חשבת
+  approvedAt      DateTime?
+  approvalNote    String?
+
+  // נעילה — ה-2 לחודש הבא
+  lockedAt        DateTime?
+
+  // יצוא
+  exportedAt      DateTime?
+  exportFileUrl   String?       // Azure Blob
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  employee        Employee    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  timeEntries     TimeEntry[]
+  absences        Absence[]
+
+  @@unique([employeeId, year, month])
+  @@index([year, month])
+  @@index([status])
+}
+
+// ============================================================
+// CRM SYNC LOG — מעקב סנכרון
+// ============================================================
+
+model CrmSyncLog {
+  id          String      @id @default(uuid())
+  entity      String      // "employees" | "projects" | "connections"
+  status      SyncStatus
+  recordsProcessed Int    @default(0)
+  recordsFailed    Int    @default(0)
+  errorMessage     String?
+  startedAt   DateTime    @default(now())
+  completedAt DateTime?
+
+  @@index([entity, startedAt])
+}
