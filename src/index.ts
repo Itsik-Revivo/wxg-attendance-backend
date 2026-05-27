@@ -14,6 +14,7 @@ import employeeRoutes   from './routes/employee.routes';
 import projectRoutes    from './routes/project.routes';
 import reportRoutes     from './routes/report.routes';
 import adminRoutes      from './routes/admin.routes';
+import emailAuthRoutes from './routes/emailAuth.routes';
 
 import { runSync }   from './services/crmSync.service';
 import { lockMonth } from './services/monthlyReport.service';
@@ -42,7 +43,11 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date() }));
 // Protected routes
 // ============================================================
 
+<<<<<<< HEAD
 app.use('/api/auth',       emailAuthRoutes); // no auth required
+=======
+>>>>>>> 42221940e402a19bb0fb731040a50b7cfae266d2
+app.use('/api/auth', emailAuthRoutes);
 app.use('/api', authMiddleware);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/employees',  employeeRoutes);
